@@ -1,27 +1,15 @@
-# Event Database Schema
+# Event Table Schema (UPDATED)
 
-Table: events
-
-- id
-- timestamp
-- object_type  ⚠️ LOCKED
-- track_id
-- frame_number  ⚠️ REQUIRED
-- video_path
-- zone_id
-- event_type
-
----
-
-## NEW TABLE: tracking_data
-
-- frame_number
-- track_id
-- object_type
-- bbox (x1,y1,x2,y2)
-
----
-
-## ⚠️ RULE
-
-- track_id must always map to same object_type
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_id INTEGER,
+    object_type TEXT,
+    zone_id INTEGER,
+    entry_time TEXT,
+    exit_time TEXT,
+    duration REAL,
+    stayed BOOLEAN,
+    video_path TEXT,
+    camera_id INTEGER,
+    mode_type TEXT
+);

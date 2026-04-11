@@ -31,6 +31,9 @@ class IntentManager:
         "enter": "entering",
         "entered": "entering",
         "entering": "entering",
+        "stay": "staying",
+        "stayed": "staying",
+        "staying": "staying",
         "exit": "leaving",
         "leave": "leaving",
         "leaving": "leaving",
@@ -64,6 +67,10 @@ class IntentManager:
             if normalized:
                 filters["event"] = normalized
 
+        track_id = self.intent.get("track_id")
+        if isinstance(track_id, int):
+            filters["track_id"] = track_id
+
         zone = self.intent.get("zone")
         zone_candidate = zone or self._zone_from_query(self.last_query.lower())
         if zone_candidate is not None:
@@ -94,6 +101,10 @@ class IntentManager:
             event = self.EVENT_ALIAS.get(token)
             if event:
                 parsed["event"] = event
+
+        track_id = self._extract_track_id(lower_query)
+        if track_id is not None:
+            parsed["track_id"] = track_id
 
         zone_candidate = self._zone_from_query(lower_query)
         if zone_candidate is not None:
@@ -147,6 +158,12 @@ class IntentManager:
 
     def _normalize_event(self, value: str) -> Optional[str]:
         return self.EVENT_ALIAS.get(value.lower())
+
+    def _extract_track_id(self, query: str) -> Optional[int]:
+        match = re.search(r"track(?:_?id)?\s*[:=#]?\s*(\d+)", query)
+        if match:
+            return int(match.group(1))
+        return None
 
     def _fallback_zone(self, query: str) -> Optional[int]:
         match = re.search(r"zone\s*(\d+)", query)

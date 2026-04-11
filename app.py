@@ -2,7 +2,7 @@ import cv2
 
 from detector import HumanDetector
 from tracker import PersonTracker
-from event import detect_event, init_db, log_event, log_tracking_data, reset_runtime_state
+from event import init_db, log_tracking_data, reset_runtime_state, update_session_event
 from intent_manager import IntentManager
 from query_engine import QueryEngine
 from video_player import play_event
@@ -137,13 +137,14 @@ def ensure_zones_at_startup():
 
 
 def _print_event_summary(results: list):
+    label = results[0]["display_label"] if results else "session"
     print("\nFound events:")
-    print("Index | Timestamp           | Camera | Zone | Object (Event)")
+    print(f"Index | {label.title():19} | Camera | Zone | Object | Track")
     for idx, event in enumerate(results):
         print(
-            f"{idx:5} | {event['timestamp'][:19]:19} | "
+            f"{idx:5} | {str(event['display_value'])[:19]:19} | "
             f"{event['camera_id']:6} | {str(event['zone_id']):4} | "
-            f"{event['object_type']} ({event['event_type']}) | track {event['track_id']}"
+            f"{event['object_type']:6} | track {event['track_id']}"
         )
 
 
@@ -181,7 +182,7 @@ def run_query_mode(query_engine: QueryEngine, intent_manager: IntentManager):
 
         intent_manager.set_intent(query)
         filters = intent_manager.get_filters()
-        results = query_engine.run_query(filters=filters, limit=30)
+        results = query_engine.run_query(filters=filters)
 
         if not results:
             print("No matching events found.")
@@ -272,19 +273,17 @@ def run_surveillance_mode(camera_config, detector):
 
                 for idx, zone in enumerate(pixel_zones, start=1):
                     zone_id = zone.get("id", idx)
-                    event = detect_event(track_id, bbox, zone, zone_id, locked_type)
-
-                    if event:
-                        log_event(
-                            track_id,
-                            locked_type,
-                            event,
-                            zone_id,
-                            camera_config["camera_id"],
-                            video_time,
-                            camera_config["source"],
-                            current_frame_number,
-                        )
+                    update_session_event(
+                        track_id=track_id,
+                        object_type=locked_type,
+                        bbox=bbox,
+                        zone=zone,
+                        zone_id=zone_id,
+                        video_time=video_time,
+                        camera_id=camera_config["camera_id"],
+                        video_path=camera_config["source"],
+                        frame_number=current_frame_number,
+                    )
 
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.putText(frame, f"{locked_type} ID {track_id}", (x1, y1 - 10),

@@ -1,47 +1,15 @@
-# Application Flow
+# Logging Flow (FINAL)
 
-## Mode 1: Surveillance
+For each track_id:
 
-- Detect + track
-- Store metadata:
-  - frame_number
-  - track_id
-  - bbox
-  - class
+1. Check zone (inside/outside)
 
-- Log events
+2. Compare previous state
 
----
+3. Apply logic:
 
-## Mode 2: Query
+- outside → inside → ENTERING
+- inside ≥ 10 sec → STAYING
+- inside → outside → LEAVING
 
-- Parse query
-- Fetch events
-- Select event
-
----
-
-## Playback Flow (NEW)
-
-1. Retrieve:
-   - video_path
-   - frame_number
-   - track_id
-
-2. Load tracking metadata
-
-3. Seek directly to frame
-
-4. For each frame:
-   - Get stored bbox for track_id
-   - Draw RED bounding box
-   - Draw zones
-
-5. Play at ~20 FPS
-
----
-
-## ⚠️ IMPORTANT
-
-- NO tracker execution in playback
-- NO frame warming
+4. Log event

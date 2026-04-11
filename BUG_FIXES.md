@@ -1,42 +1,19 @@
-# Critical Bug Fixes
+# Critical Fixes
 
-## 1. Wrong Object Highlighted
+## 30. Multiple rows per object
 
-Cause:
-- Re-tracking changes ID/class
+### Cause:
+Logging per event type
 
-Fix:
-- Use stored tracking metadata
-- Lock object_type per track_id
-
----
-
-## 2. Target track_id Not Found
-
-Cause:
-- Tracker mismatch
-
-Fix:
-- Remove tracker from playback
-- Use stored metadata
+### Fix:
+Use session-based logging
 
 ---
 
-## 3. Slow Playback
+## 31. Incorrect filtering
 
-Cause:
-- Frame warming (0 → N)
+### Cause:
+Filtering per row
 
-Fix:
-- Direct frame seek
-- No reprocessing
-
----
-
-## 4. ID Class Mismatch
-
-Cause:
-- Tracker reassignment
-
-Fix:
-- Lock class per track_id
+### Fix:
+Filter per session event

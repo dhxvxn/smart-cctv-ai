@@ -1,17 +1,13 @@
 # Features Checklist
 
-## Core
-- [ ] Detection
-- [ ] Tracking
-- [ ] track_id consistency
-- [ ] Metadata storage
+## Event System
+- [ ] Session-based events
+- [ ] One row per object
 
-## Playback
-- [ ] Instant seek
-- [ ] Metadata-based highlighting
-- [ ] Zones visible
-- [ ] No re-tracking
+## Query
+- [ ] Filter by object_type
+- [ ] Filter by track_id
+- [ ] Filter by stayed
 
-## Performance
-- [ ] Fast playback
-- [ ] FPS ~20
+## Display
+- [ ] Show entry/exit/duration

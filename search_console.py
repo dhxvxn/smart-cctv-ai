@@ -17,7 +17,7 @@ while True:
 
     intent_manager.set_intent(query)
     filters = intent_manager.get_filters()
-    results = engine.run_query(filters=filters, limit=30)
+    results = engine.run_query(filters=filters)
 
     if not results:
         print("No results.")
@@ -27,8 +27,8 @@ while True:
 
     for i, r in enumerate(results):
         print(
-            f"{i}: {r['timestamp']} | camera {r['camera_id']} | "
-            f"zone {r['zone_id']} | {r['object_type']} ({r['event_type']}) | track {r['track_id']}"
+            f"{i}: {r['display_label']}={r['display_value']} | camera {r['camera_id']} | "
+            f"zone {r['zone_id']} | {r['object_type']} | track {r['track_id']}"
         )
 
     choice = input("\nSelect result number to play video (or press Enter): ")

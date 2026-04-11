@@ -1,48 +1,34 @@
-# System Design - Smart CCTV
+# Event System (SESSION-BASED)
 
-## ⚠️ CORE CHANGE: METADATA-DRIVEN PLAYBACK
+## ⚠️ NEW DESIGN
 
-### OLD (WRONG)
-- Re-run tracker during playback ❌
-
-### NEW (CORRECT)
-- Use stored tracking metadata ✅
+Each object visit = ONE event
 
 ---
 
-## Event Lifecycle
+## EVENT STRUCTURE
 
-1. Detection
-2. Tracking → assign track_id
-3. Store tracking metadata per frame
-4. Event created
-5. Store event with track_id + frame
-6. Playback uses stored metadata
+Store:
 
----
-
-## ⚠️ ID CONSISTENCY GUARANTEE
-
-track_id must:
-- Map to ONE object_type
-- Never change class
+- track_id
+- object_type
+- zone_id
+- entry_time
+- exit_time
+- duration
+- stayed (true/false)
 
 ---
 
-## ⚠️ PERFORMANCE FIX
+## EVENT FLOW
 
-### Problem:
-Playback slow due to tracker warmup
-
-### Solution:
-- Directly seek to frame
-- Load metadata
-- No reprocessing
+1. Object enters zone → start event
+2. Object stays → update duration
+3. Object leaves → close event
 
 ---
 
-## ⚠️ RESULT
+## RESULT
 
-- Instant playback ⚡
-- Correct highlighting ✅
-- No ID mismatch ✅
+- No duplicate rows
+- Clean event representation
