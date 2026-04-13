@@ -1,34 +1,28 @@
-# Event System (SESSION-BASED)
+# Event System (FINAL OPTIMIZATION)
 
-## ⚠️ NEW DESIGN
+## PROBLEM
 
-Each object visit = ONE event
-
----
-
-## EVENT STRUCTURE
-
-Store:
-
-- track_id
-- object_type
-- zone_id
-- entry_time
-- exit_time
-- duration
-- stayed (true/false)
+Duplicate events + slow logging
 
 ---
 
-## EVENT FLOW
+## SOLUTION
 
-1. Object enters zone → start event
-2. Object stays → update duration
-3. Object leaves → close event
+### SESSION-BASED MEMORY
+
+Store events in RAM first
 
 ---
 
-## RESULT
+## DATABASE WRITE POLICY
+
+Only write when:
+
+→ object leaves zone
+
+---
+
+## BENEFITS
 
 - No duplicate rows
-- Clean event representation
+- Massive speed improvement

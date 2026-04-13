@@ -1,15 +1,35 @@
-# Logging Flow (FINAL)
+# Surveillance Flow (FINAL FIX)
 
-For each track_id:
+## ⚠️ CRITICAL RULE
 
-1. Check zone (inside/outside)
+Surveillance must run ONLY ONCE
 
-2. Compare previous state
+---
 
-3. Apply logic:
+## CURRENT ISSUE
 
-- outside → inside → ENTERING
-- inside ≥ 10 sec → STAYING
-- inside → outside → LEAVING
+Video restarts after ending → causes duplicate logging
 
-4. Log event
+---
+
+## FIX
+
+When video ends:
+
+IF ret == False:
+    break
+
+---
+
+## DO NOT
+
+- Reset frame position to 0
+- Reopen video
+- Loop video in surveillance mode
+
+---
+
+## RESULT
+
+- Each video processed only once
+- No duplicate logs

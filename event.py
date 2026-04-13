@@ -4,8 +4,9 @@ from typing import Dict, List, Optional, Tuple
 
 DB_PATH = "events.db"
 
-# keeps runtime session state per track + zone
-track_history: Dict[int, Dict[int, Dict[str, object]]] = {}
+# keeps one active in-memory session per track_id
+sessions: Dict[int, Dict[str, object]] = {}
+MIN_EVENT_DURATION_SECONDS = 1.0
 STAYING_THRESHOLD_SECONDS = 10.0
 OBJECT_TYPE_ALIASES = {
     "people": "person",
@@ -17,7 +18,7 @@ OBJECT_TYPE_ALIASES = {
 
 
 def reset_runtime_state() -> None:
-    track_history.clear()
+    sessions.clear()
 
 
 def normalize_object_type(object_type: Optional[str]) -> str:
@@ -190,70 +191,75 @@ def _utc_now_iso() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat()
 
 
-def _default_zone_state() -> Dict[str, object]:
-    return {
-        "state": "outside",
-        "entry_video_time": None,
-        "event_id": None,
-    }
-
-
 def _calculate_duration(entry_video_time: Optional[float], current_video_time: float) -> float:
     if entry_video_time is None:
         return 0.0
     return max(0.0, float(current_video_time) - float(entry_video_time))
 
 
-def _resolve_open_event_id(
-    cursor: sqlite3.Cursor,
-    zone_state: Dict[str, object],
-    track_id: int,
-    zone_id: int,
-    camera_id: Optional[int],
-    video_path: str,
-) -> Optional[int]:
-    event_id = zone_state.get("event_id")
-    if event_id:
-        return int(event_id)
+def _find_zone_by_id(zones: List[Dict], zone_id: int) -> Optional[Dict]:
+    for index, zone in enumerate(zones, start=1):
+        current_zone_id = zone.get("id", index)
+        if current_zone_id == zone_id:
+            return zone
+    return None
 
-    sql = """
-        SELECT id
-        FROM events
-        WHERE track_id = ?
-          AND zone_id = ?
-          AND video_path = ?
-          AND entry_time IS NOT NULL
-          AND exit_time IS NULL
-    """
-    params: List[object] = [track_id, zone_id, video_path]
 
-    if camera_id is None:
-        sql += " AND camera_id IS NULL"
-    else:
-        sql += " AND camera_id = ?"
-        params.append(camera_id)
+def _find_matching_zone(
+    centroid: Tuple[float, float],
+    zones: List[Dict],
+    preferred_zone_id: Optional[int] = None,
+) -> Optional[Dict]:
+    if preferred_zone_id is not None:
+        preferred_zone = _find_zone_by_id(zones, preferred_zone_id)
+        if preferred_zone and _point_inside_zone(centroid, preferred_zone):
+            return preferred_zone
 
-    sql += " ORDER BY id DESC LIMIT 1"
-    cursor.execute(sql, params)
-    row = cursor.fetchone()
-    if row:
-        zone_state["event_id"] = row[0]
-        return int(row[0])
+    for index, zone in enumerate(zones, start=1):
+        current_zone_id = zone.get("id", index)
+        if preferred_zone_id is not None and current_zone_id == preferred_zone_id:
+            continue
+        if _point_inside_zone(centroid, zone):
+            return zone
 
     return None
 
 
-def _create_session_row(
-    cursor: sqlite3.Cursor,
+def _new_session(
     track_id: int,
     object_type: str,
     zone_id: int,
     camera_id: Optional[int],
-    video_time: float,
     video_path: str,
+    entry_time: str,
+    video_time: float,
     frame_number: int,
-) -> int:
-    entry_time = _utc_now_iso()
+) -> Dict[str, object]:
+    return {
+        "track_id": track_id,
+        "object_type": object_type,
+        "zone_id": zone_id,
+        "camera_id": camera_id,
+        "video_path": video_path,
+        "entry_time": entry_time,
+        "entry_video_time": video_time,
+        "last_seen_time": entry_time,
+        "last_video_time": video_time,
+        "frame_start": frame_number,
+        "last_frame_number": frame_number,
+        "inside_status": True,
+    }
+
+
+def _insert_session_event(
+    cursor: sqlite3.Cursor,
+    session: Dict[str, object],
+    exit_time: str,
+    frame_number: int,
+    video_time: float,
+    duration: float,
+    stayed: bool,
+) -> None:
     cursor.execute(
         """
         INSERT INTO events
@@ -263,58 +269,21 @@ def _create_session_row(
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            entry_time,
-            object_type,
-            track_id,
-            camera_id,
-            video_path,
+            exit_time,
+            session["object_type"],
+            session["track_id"],
+            session["camera_id"],
+            session["video_path"],
             frame_number,
-            frame_number,
-            frame_number,
-            video_time,
-            zone_id,
-            "entering",
-            entry_time,
-            None,
-            0.0,
-            0,
-        ),
-    )
-    return int(cursor.lastrowid)
-
-
-def _update_session_row(
-    cursor: sqlite3.Cursor,
-    event_id: int,
-    object_type: str,
-    frame_number: int,
-    video_time: float,
-    duration: float,
-    stayed: bool,
-    event_type: str,
-    exit_time: Optional[str] = None,
-) -> None:
-    cursor.execute(
-        """
-        UPDATE events
-        SET object_type = ?,
-            frame_end = ?,
-            video_time = ?,
-            duration = ?,
-            stayed = ?,
-            event_type = ?,
-            exit_time = COALESCE(?, exit_time)
-        WHERE id = ?
-        """,
-        (
-            object_type,
+            session["frame_start"],
             frame_number,
             video_time,
+            session["zone_id"],
+            "leaving",
+            session["entry_time"],
+            exit_time,
             duration,
             int(stayed),
-            event_type,
-            exit_time,
-            event_id,
         ),
     )
 
@@ -323,108 +292,72 @@ def update_session_event(
     track_id: int,
     object_type: str,
     bbox: Tuple[int, int, int, int],
-    zone: Dict,
-    zone_id: int,
+    zones: List[Dict],
     video_time: float,
     camera_id: Optional[int],
     video_path: str,
     frame_number: int,
 ) -> Optional[str]:
     centroid = _calculate_centroid(bbox)
-    current_in_zone = _point_inside_zone(centroid, zone)
     object_type = normalize_object_type(object_type)
 
-    track_state = track_history.setdefault(track_id, {})
-    zone_state = track_state.setdefault(zone_id, _default_zone_state())
-    current_state = zone_state["state"]
+    session = sessions.get(track_id)
+    preferred_zone_id = int(session["zone_id"]) if session is not None else None
+    matched_zone = _find_matching_zone(centroid, zones, preferred_zone_id)
 
-    if current_state == "outside" and current_in_zone:
-        zone_state["state"] = "inside"
-        zone_state["entry_video_time"] = video_time
-
-        conn = _connect()
-        cursor = conn.cursor()
-        event_id = _create_session_row(
-            cursor,
-            track_id,
-            object_type,
-            zone_id,
-            camera_id,
-            video_time,
-            video_path,
-            frame_number,
+    if session is None and matched_zone is not None:
+        zone_id = int(matched_zone.get("id", 1))
+        entry_time = _utc_now_iso()
+        sessions[track_id] = _new_session(
+            track_id=track_id,
+            object_type=object_type,
+            zone_id=zone_id,
+            camera_id=camera_id,
+            video_path=video_path,
+            entry_time=entry_time,
+            video_time=video_time,
+            frame_number=frame_number,
         )
-        conn.commit()
-        conn.close()
-
-        zone_state["event_id"] = event_id
-        print(f"🚨 ENTERING [{object_type}] ID {track_id} in zone {zone_id}")
+        print(f"ENTERING [{object_type}] ID {track_id} in zone {zone_id}")
         return "entering"
 
-    if current_state == "inside" and current_in_zone:
-        duration = _calculate_duration(zone_state.get("entry_video_time"), video_time)
-        stayed = duration >= STAYING_THRESHOLD_SECONDS
+    if session is not None and matched_zone is not None:
+        last_seen_time = _utc_now_iso()
+        session["last_seen_time"] = last_seen_time
+        session["last_video_time"] = video_time
+        session["last_frame_number"] = frame_number
+        session["object_type"] = object_type
+        session["inside_status"] = True
 
-        conn = _connect()
-        cursor = conn.cursor()
-        event_id = _resolve_open_event_id(
-            cursor,
-            zone_state,
-            track_id,
-            zone_id,
-            camera_id,
-            video_path,
-        )
-        if event_id is not None:
-            _update_session_row(
-                cursor,
-                event_id,
-                object_type,
-                frame_number,
-                video_time,
-                duration,
-                stayed,
-                "staying" if stayed else "entering",
-            )
-            conn.commit()
-        conn.close()
+        duration = _calculate_duration(session.get("entry_video_time"), video_time)
+        stayed = duration >= STAYING_THRESHOLD_SECONDS
         return "staying" if stayed else None
 
-    if current_state == "inside" and not current_in_zone:
-        duration = _calculate_duration(zone_state.get("entry_video_time"), video_time)
+    if session is not None and matched_zone is None:
+        duration = _calculate_duration(session.get("entry_video_time"), video_time)
         stayed = duration >= STAYING_THRESHOLD_SECONDS
         exit_time = _utc_now_iso()
+        zone_id = int(session["zone_id"])
 
-        conn = _connect()
-        cursor = conn.cursor()
-        event_id = _resolve_open_event_id(
-            cursor,
-            zone_state,
-            track_id,
-            zone_id,
-            camera_id,
-            video_path,
-        )
-        if event_id is not None:
-            _update_session_row(
-                cursor,
-                event_id,
-                object_type,
-                frame_number,
-                video_time,
-                duration,
-                stayed,
-                "leaving",
+        if duration >= MIN_EVENT_DURATION_SECONDS:
+            conn = _connect()
+            cursor = conn.cursor()
+            session["object_type"] = object_type
+            _insert_session_event(
+                cursor=cursor,
+                session=session,
                 exit_time=exit_time,
+                frame_number=frame_number,
+                video_time=video_time,
+                duration=duration,
+                stayed=stayed,
             )
             conn.commit()
-        conn.close()
+            conn.close()
 
-        zone_state["state"] = "outside"
-        zone_state["entry_video_time"] = None
-        zone_state["event_id"] = None
+        sessions.pop(track_id, None)
         print(
-            f"🚨 LEAVING [{object_type}] ID {track_id} in zone {zone_id} "
+            f"LEAVING [{object_type}] ID {track_id} in zone {zone_id} "
             f"| duration={duration:.2f}s | stayed={stayed}"
         )
         return "leaving"

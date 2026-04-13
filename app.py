@@ -6,15 +6,7 @@ from event import init_db, log_tracking_data, reset_runtime_state, update_sessio
 from intent_manager import IntentManager
 from query_engine import QueryEngine
 from video_player import play_event
-from zone_manager import ensure_camera_zones, has_any_zones
-
-VIDEO_PATH = "test.mp4"
-CAMERA_ID = 1
-
-ZONES = []
-drawing = False
-start_point = None
-current_rect = None
+from zone_manager import build_pixel_zones, draw_camera_zones, get_camera_zones, overwrite_zones
 
 CAMERA_CONFIGS = [
     {
@@ -43,39 +35,9 @@ STATUS_COLOR = (255, 255, 255)
 STATUS_BG = (0, 0, 0)
 DEFAULT_FPS = 25.0
 TARGET_PROCESS_FPS = 20.0
-
-
-def draw_rectangle(event, x, y, flags, param):
-    global drawing, start_point, current_rect, ZONES
-
-    if event == cv2.EVENT_LBUTTONDOWN:
-        drawing = True
-        start_point = (x, y)
-
-    elif event == cv2.EVENT_MOUSEMOVE and drawing:
-        current_rect = (start_point[0], start_point[1], x, y)
-
-    elif event == cv2.EVENT_LBUTTONUP:
-        drawing = False
-
-        x1, y1 = start_point
-        x2, y2 = x, y
-
-        zone_id = len(ZONES) + 1
-
-        zone = {
-            "x1": min(x1, x2),
-            "y1": min(y1, y2),
-            "x2": max(x1, x2),
-            "y2": max(y1, y2),
-            "id": zone_id,
-            "name": f"Zone {zone_id}"
-        }
-
-        ZONES.append(zone)
-        current_rect = None
-
-        print(f"✅ Zone {len(ZONES)} added:", zone)
+PLAYBACK_JUMP_SECONDS = 2
+LEFT_ARROW_KEYS = {81, 2424832, 65361}
+RIGHT_ARROW_KEYS = {83, 2555904, 65363}
 
 
 def resolve_capture_source(source):
@@ -98,13 +60,31 @@ def draw_zone_overlays(frame, zones_list):
                     ZONE_TEXT_COLOR, 2)
 
 
-def render_status(frame, camera_name, camera_id, fps, frame_count):
+def render_status(frame, camera_name, camera_id, fps, frame_count, paused):
     status = f"{camera_name} #{camera_id} | FPS:{fps:.1f} | Frame:{frame_count}"
-    cv2.rectangle(frame, (0, 0), (frame.shape[1], 28), STATUS_BG, cv2.FILLED)
-    cv2.putText(frame, status,
-                (10, 20),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                STATUS_COLOR, 2)
+    if paused:
+        status += " | PAUSED"
+
+    controls = "SPACE pause/play | LEFT -2s | RIGHT +2s | Q quit | N next camera"
+    cv2.rectangle(frame, (0, 0), (frame.shape[1], 52), STATUS_BG, cv2.FILLED)
+    cv2.putText(
+        frame,
+        status,
+        (10, 20),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        STATUS_COLOR,
+        2,
+    )
+    cv2.putText(
+        frame,
+        controls,
+        (10, 42),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        STATUS_COLOR,
+        1,
+    )
 
 
 def capture_static_frame(camera_config):
@@ -118,22 +98,51 @@ def capture_static_frame(camera_config):
     return frame if ret else None
 
 
-def ensure_zones_at_startup():
-    if has_any_zones():
-        return
+def _frame_delta_for_seconds(fps, seconds):
+    return max(1, int(round(fps * seconds)))
 
+
+def _seek_frame(cap, target_frame, total_frames):
+    if total_frames > 0:
+        target_frame = max(0, min(target_frame, total_frames - 1))
+    else:
+        target_frame = max(0, target_frame)
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+    return target_frame
+
+
+def _is_left_arrow(key):
+    return key in LEFT_ARROW_KEYS
+
+
+def _is_right_arrow(key):
+    return key in RIGHT_ARROW_KEYS
+
+
+def configure_zones_at_startup():
     if not CAMERA_CONFIGS:
         return
 
-    print("📦 No zones configured yet; capturing frame for zone definition.")
-    camera = CAMERA_CONFIGS[0]
-    frame = capture_static_frame(camera)
+    print("\n📦 Zone setup starts now. Existing zones will be overwritten in zones.json.")
+    all_zones = []
+    next_zone_id = 1
 
-    if frame is None:
-        print("⚠️ Unable to capture frame for zone setup; zones will be requested when needed.")
-        return
+    for camera in CAMERA_CONFIGS:
+        print(f"\n🎯 Draw zones for {camera['name']} ({camera['source']})")
+        print("   Drag with the mouse, press 's' to save each zone, 'z' to remove the last one, Enter to finish.")
 
-    ensure_camera_zones(camera, frame)
+        frame = capture_static_frame(camera)
+        if frame is None:
+            print(f"⚠️ Unable to capture frame for {camera['name']}; saving no zones for this camera.")
+            continue
+
+        drawn_zones = draw_camera_zones(camera, frame, next_zone_id)
+        all_zones.extend(drawn_zones)
+        next_zone_id += len(drawn_zones)
+
+    overwrite_zones(all_zones)
+    print(f"💾 Saved {len(all_zones)} zone(s) to zones.json")
 
 
 def _print_event_summary(results: list):
@@ -200,14 +209,25 @@ def run_surveillance_mode(camera_config, detector):
         return True
 
     print(f"\n▶ Monitoring {camera_config['name']} ({camera_config['source']})")
-    print("   Press 'n' to switch camera, 'q' or Esc to exit surveillance.")
+    print("   Controls: SPACE pause/play, LEFT -2s, RIGHT +2s, N next camera, Q/Esc exit.")
 
     fps = cap.get(cv2.CAP_PROP_FPS) or DEFAULT_FPS
     frame_skip = max(1, int(round(fps / TARGET_PROCESS_FPS)))
+    jump_frames = _frame_delta_for_seconds(fps, PLAYBACK_JUMP_SECONDS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    zone_defs = get_camera_zones(camera_config["camera_id"])
+    if not zone_defs:
+        print(f"⚠️ No zones configured for {camera_config['name']}.")
+        cap.release()
+        return True
+
     tracker = PersonTracker()
     track_type_locks = {}
     reset_runtime_state()
-    pixel_zones = []
+    pixel_zones = None
+    paused = False
+    display_frame = None
+    current_frame_number = 0
     should_continue = True
     window_name = f"CCTV - {camera_config['name']}"
 
@@ -215,101 +235,118 @@ def run_surveillance_mode(camera_config, detector):
 
     try:
         while True:
-            # frame skipping to target ~20 FPS processing
-            for _ in range(frame_skip):
-                ret = cap.grab()
-                if not ret:
+            if not paused or display_frame is None:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    print(f"❌ {camera_config['name']} stream ended.")
                     break
 
-            if not ret:
-                print(f"❌ {camera_config['name']} stream ended.")
-                break
+                current_frame_number = max(0, int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1)
+                if pixel_zones is None:
+                    pixel_zones = build_pixel_zones(zone_defs, frame.shape)
+                    if not pixel_zones:
+                        print(f"⚠️ Saved zones for {camera_config['name']} could not be rendered.")
+                        should_continue = False
+                        break
 
-            ret, frame = cap.retrieve()
+                video_time = current_frame_number / fps if fps else current_frame_number / DEFAULT_FPS
 
-            if frame is None:
-                print(f"❌ {camera_config['name']} frame is None.")
-                break
+                detections = detector.detect(frame)
+                tracked_objects = tracker.update(frame, detections)
 
-            if not pixel_zones:
-                pixel_zones = ensure_camera_zones(camera_config, frame)
+                for (x1, y1, x2, y2, track_id, cls_id) in tracked_objects:
+                    object_type = detector.model.names[cls_id]
+                    normalized_type = object_type.lower()
 
-                if not pixel_zones:
-                    print(f"⚠️ No zones configured for {camera_config['name']}.")
-                    should_continue = False
-                    break
+                    if normalized_type not in TRACKED_CLASSES:
+                        continue
 
-            current_frame_number = max(0, int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1)
-            video_time = current_frame_number / fps if fps else current_frame_number / DEFAULT_FPS
+                    locked_type = track_type_locks.setdefault(track_id, normalized_type)
+                    if locked_type != normalized_type:
+                        print(
+                            f"⚠️ Discarding class mismatch for track {track_id}: "
+                            f"locked={locked_type}, detected={normalized_type}"
+                        )
+                        continue
 
-            detections = detector.detect(frame)
-            tracked_objects = tracker.update(frame, detections)
-
-            for (x1, y1, x2, y2, track_id, cls_id) in tracked_objects:
-                object_type = detector.model.names[cls_id]
-                normalized_type = object_type.lower()
-
-                if normalized_type not in TRACKED_CLASSES:
-                    continue
-
-                locked_type = track_type_locks.setdefault(track_id, normalized_type)
-                if locked_type != normalized_type:
-                    print(
-                        f"⚠️ Discarding class mismatch for track {track_id}: "
-                        f"locked={locked_type}, detected={normalized_type}"
+                    log_tracking_data(
+                        track_id,
+                        locked_type,
+                        (x1, y1, x2, y2),
+                        current_frame_number,
+                        camera_config["camera_id"],
+                        camera_config["source"],
                     )
-                    continue
 
-                log_tracking_data(
-                    track_id,
-                    locked_type,
-                    (x1, y1, x2, y2),
-                    current_frame_number,
-                    camera_config["camera_id"],
-                    camera_config["source"],
-                )
+                    bbox = (x1, y1, x2 - x1, y2 - y1)
 
-                bbox = (x1, y1, x2 - x1, y2 - y1)
-
-                for idx, zone in enumerate(pixel_zones, start=1):
-                    zone_id = zone.get("id", idx)
                     update_session_event(
                         track_id=track_id,
                         object_type=locked_type,
                         bbox=bbox,
-                        zone=zone,
-                        zone_id=zone_id,
+                        zones=pixel_zones,
                         video_time=video_time,
                         camera_id=camera_config["camera_id"],
                         video_path=camera_config["source"],
                         frame_number=current_frame_number,
                     )
 
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(frame, f"{locked_type} ID {track_id}", (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(
+                        frame,
+                        f"{locked_type} ID {track_id}",
+                        (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (0, 255, 0),
+                        2,
+                    )
 
-            if pixel_zones:
                 draw_zone_overlays(frame, pixel_zones)
+                display_frame = frame
 
+            frame_to_show = display_frame.copy()
             render_status(
-                frame,
+                frame_to_show,
                 camera_config["name"],
                 camera_config["camera_id"],
                 fps,
                 current_frame_number,
+                paused,
             )
 
-            cv2.imshow(window_name, frame)
+            cv2.imshow(window_name, frame_to_show)
 
-            key = cv2.waitKey(1) & 0xFF
+            key = cv2.waitKeyEx(30 if paused else max(1, int(1000 / TARGET_PROCESS_FPS)))
 
             if key == ord("n"):
                 break
 
-            if key in (ord("q"), 27):
+            if key in (ord("q"), ord("Q"), 27):
                 should_continue = False
                 break
+
+            if key == ord(" "):
+                paused = not paused
+                continue
+
+            if _is_left_arrow(key) or _is_right_arrow(key):
+                frame_offset = -jump_frames if _is_left_arrow(key) else jump_frames
+                _seek_frame(cap, current_frame_number + frame_offset, total_frames)
+                tracker = PersonTracker()
+                track_type_locks = {}
+                reset_runtime_state()
+                display_frame = None
+                continue
+
+            if not paused:
+                next_frame = current_frame_number + frame_skip
+                if total_frames > 0 and next_frame >= total_frames:
+                    print(f"✅ Finished processing {camera_config['name']}.")
+                    break
+                else:
+                    _seek_frame(cap, next_frame, total_frames)
+                display_frame = None
 
     finally:
         cap.release()
@@ -343,7 +380,7 @@ def main():
     detector = HumanDetector()
     intent_manager = IntentManager()
     query_engine = QueryEngine()
-    ensure_zones_at_startup()
+    configure_zones_at_startup()
 
     while True:
         print("\nSelect Mode:")

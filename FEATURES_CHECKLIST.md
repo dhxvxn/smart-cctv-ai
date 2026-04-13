@@ -1,13 +1,9 @@
 # Features Checklist
 
-## Event System
-- [ ] Session-based events
-- [ ] One row per object
+## Surveillance
+- [ ] No looping
+- [ ] Stops at video end
 
-## Query
-- [ ] Filter by object_type
-- [ ] Filter by track_id
-- [ ] Filter by stayed
-
-## Display
-- [ ] Show entry/exit/duration
+## Playback
+- [ ] Loop enabled
+- [ ] Controls working

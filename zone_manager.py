@@ -1,10 +1,15 @@
 import json
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 
 ZONES_PATH = "zones.json"
+ZONE_COLOR = (0, 128, 255)
+PENDING_ZONE_COLOR = (255, 255, 0)
+TEXT_COLOR = (255, 255, 255)
+INFO_COLOR = (200, 200, 200)
+ENTER_KEYS = {10, 13}
 
 
 def _ensure_file_exists() -> None:
@@ -110,6 +115,10 @@ def persist_camera_zones(camera_id: int, zone_defs: List[Dict]) -> None:
     _persist_all_zones(all_zones)
 
 
+def overwrite_zones(zone_defs: List[Dict]) -> None:
+    _persist_all_zones(zone_defs)
+
+
 def _template_to_zones(camera_config: Dict, start_id: int) -> List[Dict]:
     templates = camera_config.get("zone_templates", [])
     camera_id = camera_config["camera_id"]
@@ -153,6 +162,7 @@ class ZoneDrawer:
         self.drawing = False
         self.start_point = None
         self.current_rect = None
+        self.pending_rect: Optional[Tuple[int, int, int, int]] = None
         self.next_id = start_id
         self.height, self.width = frame.shape[:2]
 
@@ -169,10 +179,11 @@ class ZoneDrawer:
 
         elif event == cv2.EVENT_LBUTTONUP and self.drawing and self.start_point:
             self.drawing = False
-            self._finalize_rectangle(self.start_point, (x, y))
+            self.pending_rect = self._normalize_rectangle(self.start_point, (x, y))
             self.current_rect = None
+            self.start_point = None
 
-    def _finalize_rectangle(self, start, end) -> None:
+    def _normalize_rectangle(self, start, end) -> Optional[Tuple[int, int, int, int]]:
         x1, y1 = start
         x2, y2 = end
         min_x, max_x = sorted((x1, x2))
@@ -181,7 +192,12 @@ class ZoneDrawer:
         height = max_y - min_y
 
         if width < 10 or height < 10:
-            return
+            return None
+
+        return min_x, min_y, max_x, max_y
+
+    def _finalize_rectangle(self, rect: Tuple[int, int, int, int]) -> None:
+        min_x, min_y, max_x, max_y = rect
 
         points = [
             [min_x / self.width, min_y / self.height],
@@ -199,38 +215,56 @@ class ZoneDrawer:
 
         self.next_id += 1
         self.zones.append(zone)
+        self.pending_rect = None
 
         print(f"✅ Captured zone {zone['id']} for camera {self.camera_id}")
+
+    def _draw_rectangle(self, canvas, rect, color, label: str) -> None:
+        x1, y1, x2, y2 = rect
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(
+            canvas,
+            label,
+            (x1, max(10, y1 - 10)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            TEXT_COLOR,
+            1,
+        )
 
     def _draw_zones(self, canvas) -> None:
         for zone in self.zones:
             bbox = _points_to_bbox(zone.get("points", []), canvas.shape)
-            cv2.rectangle(canvas,
-                          (bbox["x1"], bbox["y1"]),
-                          (bbox["x2"], bbox["y2"]),
-                          (0, 128, 255), 2)
-            cv2.putText(canvas,
-                        zone.get("name", f"Zone {zone['id']}"),
-                        (bbox["x1"], max(10, bbox["y1"] - 10)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            self._draw_rectangle(
+                canvas,
+                (bbox["x1"], bbox["y1"], bbox["x2"], bbox["y2"]),
+                ZONE_COLOR,
+                zone.get("name", f"Zone {zone['id']}"),
+            )
 
         if self.current_rect:
-            x1, y1, x2, y2 = self.current_rect
-            cv2.rectangle(canvas,
-                          (x1, y1),
-                          (x2, y2),
-                          (255, 255, 0), 1)
+            self._draw_rectangle(canvas, self.current_rect, PENDING_ZONE_COLOR, "Drawing")
+
+        if self.pending_rect:
+            self._draw_rectangle(canvas, self.pending_rect, PENDING_ZONE_COLOR, "Pending save")
 
     def _draw_instructions(self, canvas) -> None:
         instructions = [
             "Left click + drag to draw a zone",
-            "Press 's' to save, 'c' to clear, Esc/q to cancel",
-            f"Zones ready: {len(self.zones)}",
+            "S save zone | Z delete last zone | Enter finish | Q/Esc cancel",
+            f"Saved zones: {len(self.zones)}",
         ]
 
         for idx, text in enumerate(instructions):
-            cv2.putText(canvas, text, (10, 20 + idx * 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+            cv2.putText(
+                canvas,
+                text,
+                (10, 20 + idx * 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                INFO_COLOR,
+                1,
+            )
 
     def run(self) -> List[Dict]:
         while True:
@@ -238,15 +272,21 @@ class ZoneDrawer:
             self._draw_zones(canvas)
             self._draw_instructions(canvas)
             cv2.imshow(self.window_name, canvas)
-            key = cv2.waitKey(30) & 0xFF
+            key = cv2.waitKeyEx(30)
 
-            if key == ord("s") and self.zones:
+            if key in (ord("s"), ord("S")) and self.pending_rect:
+                self._finalize_rectangle(self.pending_rect)
+                continue
+
+            if key in (ord("z"), ord("Z")) and self.zones:
+                removed_zone = self.zones.pop()
+                print(f"🗑️ Removed zone {removed_zone['id']} from camera {self.camera_id}")
+                continue
+
+            if key in ENTER_KEYS:
                 break
 
-            if key == ord("c"):
-                self.zones.clear()
-
-            if key in (27, ord("q")):
+            if key in (27, ord("q"), ord("Q")):
                 self.zones = []
                 break
 
@@ -254,26 +294,11 @@ class ZoneDrawer:
         return self.zones
 
 
+def draw_camera_zones(camera_config: Dict, frame, start_id: int) -> List[Dict]:
+    drawer = ZoneDrawer(frame, camera_config["camera_id"], camera_config["name"], start_id)
+    return drawer.run()
+
+
 def ensure_camera_zones(camera_config: Dict, frame) -> List[Dict]:
     camera_id = camera_config["camera_id"]
-    existing = get_camera_zones(camera_id)
-
-    if existing:
-        return build_pixel_zones(existing, frame.shape)
-
-    next_id = _next_zone_id(_load_all_zones())
-
-    if camera_config.get("zone_templates"):
-        templates = _template_to_zones(camera_config, next_id)
-        if templates:
-            persist_camera_zones(camera_id, templates)
-            return build_pixel_zones(templates, frame.shape)
-
-    drawer = ZoneDrawer(frame, camera_id, camera_config["name"], next_id)
-    drawn_zones = drawer.run()
-
-    if drawn_zones:
-        persist_camera_zones(camera_id, drawn_zones)
-        return build_pixel_zones(drawn_zones, frame.shape)
-
-    return []
+    return build_pixel_zones(get_camera_zones(camera_id), frame.shape)

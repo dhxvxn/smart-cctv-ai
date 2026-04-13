@@ -1,19 +1,20 @@
 # Critical Fixes
 
-## 30. Multiple rows per object
+## 34. Duplicate Events Due to Looping
 
 ### Cause:
-Logging per event type
-
-### Fix:
-Use session-based logging
+Surveillance video looping
 
 ---
 
-## 31. Incorrect filtering
-
-### Cause:
-Filtering per row
-
 ### Fix:
-Filter per session event
+
+1. Stop loop in surveillance
+2. Break when video ends
+
+---
+
+## RESULT
+
+- No repeated logging
+- Faster processing

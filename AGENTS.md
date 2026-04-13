@@ -1,36 +1,24 @@
-# Event Agent (SESSION MODE)
+# Logging Agent
 
 ## ⚠️ RULE
 
-Do NOT log separate events
+Logging must NOT be affected by playback logic
 
 ---
 
-## LOGIC
+## SURVEILLANCE MODE
 
-For each track_id:
-
-### ENTER
-IF outside → inside:
-    create new event
-    store entry_time
+- Process video once
+- No looping allowed
 
 ---
 
-### STAY
-IF inside:
-    update duration
+## PLAYBACK MODE
+
+- Loop allowed
 
 ---
 
-### EXIT
-IF inside → outside:
-    update exit_time
-    compute duration
+## SEPARATION
 
-    IF duration ≥ 10 sec:
-        stayed = TRUE
-    ELSE:
-        stayed = FALSE
-
-    save event
+Surveillance and playback must be independent
