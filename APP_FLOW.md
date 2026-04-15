@@ -1,35 +1,23 @@
-# Surveillance Flow (FINAL FIX)
+# Retrieval System (FIXED)
 
-## ⚠️ CRITICAL RULE
+## PROBLEM
 
-Surveillance must run ONLY ONCE
-
----
-
-## CURRENT ISSUE
-
-Video restarts after ending → causes duplicate logging
+Only 3 sec clip shown
 
 ---
 
 ## FIX
 
-When video ends:
+Retrieve FULL session:
 
-IF ret == False:
-    break
-
----
-
-## DO NOT
-
-- Reset frame position to 0
-- Reopen video
-- Loop video in surveillance mode
+start_time = entry_time - buffer (2 sec)
+end_time = exit_time + buffer (2 sec)
 
 ---
 
 ## RESULT
 
-- Each video processed only once
-- No duplicate logs
+Playback includes:
+- entering
+- staying
+- leaving

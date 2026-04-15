@@ -33,7 +33,7 @@ class QueryEngine:
         display_mode = self._resolve_display_mode(filters)
 
         sql = """
-            SELECT track_id, camera_id, zone_id,
+            SELECT track_id, global_id, camera_id, zone_id,
                    entry_time, exit_time, duration, stayed,
                    object_type, event_type,
                    frame_start, frame_end, video_time, video_path, timestamp
@@ -64,6 +64,11 @@ class QueryEngine:
             sql += " AND track_id = ?"
             params.append(track_id)
 
+        global_id = filters.get("global_id")
+        if isinstance(global_id, int):
+            sql += " AND global_id = ?"
+            params.append(global_id)
+
         time_range = filters.get("time_range")
         if time_range:
             start_hour, end_hour = self._normalize_hour_range(time_range)
@@ -79,28 +84,29 @@ class QueryEngine:
 
         results: List[Dict[str, Any]] = []
         for row in rows:
-            frame_start = row[9]
-            frame_end = row[10]
+            frame_start = row[10]
+            frame_end = row[11]
             frame_number = frame_end if display_mode == "leaving" and frame_end is not None else frame_start
-            display_label, display_value = self._display_value(display_mode, row[3], row[4], row[5])
+            display_label, display_value = self._display_value(display_mode, row[4], row[5], row[6])
 
             results.append(
                 {
                     "track_id": row[0],
-                    "camera_id": row[1],
-                    "zone_id": row[2],
-                    "entry_time": row[3],
-                    "exit_time": row[4],
-                    "duration": row[5],
-                    "stayed": bool(row[6]),
-                    "object_type": row[7],
-                    "event_type": row[8],
+                    "global_id": row[1],
+                    "camera_id": row[2],
+                    "zone_id": row[3],
+                    "entry_time": row[4],
+                    "exit_time": row[5],
+                    "duration": row[6],
+                    "stayed": bool(row[7]),
+                    "object_type": row[8],
+                    "event_type": row[9],
                     "frame_number": frame_number if frame_number is not None else frame_start,
                     "frame_start": frame_start,
                     "frame_end": frame_end,
-                    "video_time": row[11],
-                    "video_path": row[12],
-                    "timestamp": row[13] or row[3],
+                    "video_time": row[12],
+                    "video_path": row[13],
+                    "timestamp": row[14] or row[4],
                     "display_mode": display_mode,
                     "display_label": display_label,
                     "display_value": display_value,
@@ -120,6 +126,10 @@ class QueryEngine:
         track_match = re.search(r"track(?:_?id)?\s*[:=#]?\s*(\d+)", query_lower)
         if track_match:
             filters["track_id"] = int(track_match.group(1))
+
+        global_match = re.search(r"global(?:_?id)?\s*[:=#]?\s*(\d+)", query_lower)
+        if global_match:
+            filters["global_id"] = int(global_match.group(1))
 
         if "enter" in query_lower:
             filters["event"] = "entering"

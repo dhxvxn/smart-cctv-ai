@@ -1,24 +1,25 @@
-# Logging Agent
+# Global ID Agent (ReID Upgrade)
 
-## ⚠️ RULE
+## PROCESS
 
-Logging must NOT be affected by playback logic
+For each detection:
 
----
+1. extract FastReID embedding
 
-## SURVEILLANCE MODE
+2. compare with global pool
 
-- Process video once
-- No looping allowed
-
----
-
-## PLAYBACK MODE
-
-- Loop allowed
+3. compute:
+   - cosine similarity
+   - time difference
 
 ---
 
-## SEPARATION
+## MATCH CONDITION
 
-Surveillance and playback must be independent
+IF similarity > 0.75
+AND time_diff < 3 sec:
+
+    assign same global_id
+
+ELSE:
+    create new global_id

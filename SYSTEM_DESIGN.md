@@ -1,28 +1,46 @@
-# Event System (FINAL OPTIMIZATION)
+# Cross-Camera ReID (FINAL)
 
-## PROBLEM
+## FEATURES USED
 
-Duplicate events + slow logging
-
----
-
-## SOLUTION
-
-### SESSION-BASED MEMORY
-
-Store events in RAM first
+1. FastReID embedding
+2. Timestamp proximity
+3. Motion continuity
 
 ---
 
-## DATABASE WRITE POLICY
+## MATCH RULE
 
-Only write when:
+Match if:
 
-→ object leaves zone
+1. cosine_similarity > 0.75
+2. abs(time difference) < 3 sec
 
 ---
 
-## BENEFITS
+## OPTIONAL BOOST
 
-- No duplicate rows
-- Massive speed improvement
+If object direction matches → increase confidence
+
+---
+
+## RESULT
+
+Same object across cameras → SAME global_id
+# Performance Optimization
+
+## FIXES
+
+1. Reduce FPS:
+   process every 2–3 frames
+
+2. Batch DB writes:
+   store in memory → write once
+
+3. Cache embeddings:
+   avoid recomputing per frame
+
+---
+
+## RESULT
+
+Faster logging WITHOUT losing accuracy

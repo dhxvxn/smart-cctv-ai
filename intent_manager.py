@@ -71,6 +71,10 @@ class IntentManager:
         if isinstance(track_id, int):
             filters["track_id"] = track_id
 
+        global_id = self.intent.get("global_id")
+        if isinstance(global_id, int):
+            filters["global_id"] = global_id
+
         zone = self.intent.get("zone")
         zone_candidate = zone or self._zone_from_query(self.last_query.lower())
         if zone_candidate is not None:
@@ -105,6 +109,10 @@ class IntentManager:
         track_id = self._extract_track_id(lower_query)
         if track_id is not None:
             parsed["track_id"] = track_id
+
+        global_id = self._extract_global_id(lower_query)
+        if global_id is not None:
+            parsed["global_id"] = global_id
 
         zone_candidate = self._zone_from_query(lower_query)
         if zone_candidate is not None:
@@ -161,6 +169,12 @@ class IntentManager:
 
     def _extract_track_id(self, query: str) -> Optional[int]:
         match = re.search(r"track(?:_?id)?\s*[:=#]?\s*(\d+)", query)
+        if match:
+            return int(match.group(1))
+        return None
+
+    def _extract_global_id(self, query: str) -> Optional[int]:
+        match = re.search(r"global(?:_?id)?\s*[:=#]?\s*(\d+)", query)
         if match:
             return int(match.group(1))
         return None

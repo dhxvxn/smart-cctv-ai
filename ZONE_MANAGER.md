@@ -1,37 +1,25 @@
-# Zone Management System
+# Zone System Fix
 
-## ⚠️ BEHAVIOR
+## ⚠️ PROBLEM
 
-Zones must be drawn EVERY time app starts
-
----
-
-## CONTROLS
-
-- Mouse click → draw polygon
-- S → save current zone
-- Z → delete last zone
-- ENTER → finish drawing
+Zones increasing beyond drawn zones
 
 ---
 
-## STORAGE
+## FIX
 
-- Save zones to zones.json
-- Overwrite previous zones each run
+1. On app start:
+   - clear existing zones
+
+2. When saving:
+   - overwrite zones.json
+
+3. Assign zone_id sequentially:
+   zone_id = 1,2,3,...
 
 ---
 
-## RULE
+## RESULT
 
-Zones must be confirmed before surveillance starts
-
----
-
-## DISPLAY LEGEND
-
-Show on screen:
-
-[S] Save Zone  
-[Z] Undo Zone  
-[ENTER] Finish  
+- no ghost zones
+- correct indexing

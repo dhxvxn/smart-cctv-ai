@@ -28,7 +28,8 @@ while True:
     for i, r in enumerate(results):
         print(
             f"{i}: {r['display_label']}={r['display_value']} | camera {r['camera_id']} | "
-            f"zone {r['zone_id']} | {r['object_type']} | track {r['track_id']}"
+            f"zone {r['zone_id']} | {r['object_type']} | "
+            f"global {r.get('global_id', '-')} | track {r['track_id']}"
         )
 
     choice = input("\nSelect result number to play video (or press Enter): ")
@@ -50,10 +51,4 @@ while True:
 
     result = results[idx]
 
-    play_event(
-        result["video_path"],
-        result["frame_number"],
-        result["track_id"],
-        result.get("camera_id"),
-        result.get("video_time"),
-    )
+    play_event(result)

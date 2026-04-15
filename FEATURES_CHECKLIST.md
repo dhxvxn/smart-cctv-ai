@@ -1,9 +1,16 @@
-# Features Checklist
+# Final Features
 
-## Surveillance
-- [ ] No looping
-- [ ] Stops at video end
+## Identity
+- [ ] FastReID integration
+- [ ] Cross-camera matching works
 
 ## Playback
-- [ ] Loop enabled
-- [ ] Controls working
+- [ ] Full session playback
+- [ ] No frame clipping
+
+## UI
+- [ ] No full-frame highlight
+- [ ] Object-only highlight
+
+## Performance
+- [ ] Fast logging

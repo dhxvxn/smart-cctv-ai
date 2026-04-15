@@ -1,20 +1,16 @@
 # Critical Fixes
 
-## 34. Duplicate Events Due to Looping
+## 43. Same object different IDs across cameras
 
 ### Cause:
-Surveillance video looping
+No time-based matching
 
 ---
 
-### Fix:
-
-1. Stop loop in surveillance
-2. Break when video ends
+## Fix:
+Add time proximity condition
 
 ---
 
-## RESULT
-
-- No repeated logging
-- Faster processing
+## RESULT:
+Cross-camera identity works

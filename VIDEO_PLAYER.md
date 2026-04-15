@@ -1,28 +1,24 @@
-# Video Playback System
+## FIX: OBJECT-ONLY HIGHLIGHT
 
-## ⚠️ LOOPING ONLY HERE
-
-Looping is allowed ONLY in playback
+Do NOT draw border around full frame.
 
 ---
 
-## LOOP LOGIC
+## RULE
 
-IF video ends:
-    set frame position = 0
+Highlight ONLY bounding box where:
+
+global_id == target_gid
 
 ---
 
-## CONTROLS
+## REMOVE
 
-- SPACE → pause/play
-- LEFT → -2 sec
-- RIGHT → +2 sec
-- Q → quit
+- any rectangle covering entire frame
 
 ---
 
 ## RESULT
 
-- Smooth looping playback
-- No impact on logging
+- clean UI
+- only target object highlighted
