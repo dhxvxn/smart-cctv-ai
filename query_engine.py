@@ -1,3 +1,4 @@
+import json
 import re
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
@@ -22,6 +23,7 @@ class QueryEngine:
         self,
         filters: Optional[Dict[str, Any]] = None,
         user_query: Optional[str] = None,
+        session_mode: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         filters = filters or {}
 
@@ -30,13 +32,17 @@ class QueryEngine:
 
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
+        self._ensure_event_columns(cursor)
+        conn.commit()
         display_mode = self._resolve_display_mode(filters)
+        session_mode = self._normalize_session_mode(session_mode or filters.get("session_mode"))
 
         sql = """
             SELECT track_id, global_id, camera_id, zone_id,
                    entry_time, exit_time, duration, stayed,
                    object_type, event_type,
-                   frame_start, frame_end, video_time, video_path, timestamp
+                   frame_start, frame_end, video_time, video_path, timestamp,
+                   cameras, video_paths, COALESCE(event_mode, mode_type, 'multi')
             FROM events
             WHERE entry_time IS NOT NULL
         """
@@ -69,6 +75,10 @@ class QueryEngine:
             sql += " AND global_id = ?"
             params.append(global_id)
 
+        if session_mode:
+            sql += " AND COALESCE(event_mode, mode_type, 'multi') = ?"
+            params.append(session_mode)
+
         time_range = filters.get("time_range")
         if time_range:
             start_hour, end_hour = self._normalize_hour_range(time_range)
@@ -88,6 +98,9 @@ class QueryEngine:
             frame_end = row[11]
             frame_number = frame_end if display_mode == "leaving" and frame_end is not None else frame_start
             display_label, display_value = self._display_value(display_mode, row[4], row[5], row[6])
+            camera_list = self._decode_json_list(row[15])
+            video_path_list = self._decode_json_list(row[16])
+            event_mode = row[17] or "multi"
 
             results.append(
                 {
@@ -107,6 +120,10 @@ class QueryEngine:
                     "video_time": row[12],
                     "video_path": row[13],
                     "timestamp": row[14] or row[4],
+                    "cameras": camera_list,
+                    "video_paths": video_path_list,
+                    "session_mode": event_mode,
+                    "event_mode": event_mode,
                     "display_mode": display_mode,
                     "display_label": display_label,
                     "display_value": display_value,
@@ -114,6 +131,29 @@ class QueryEngine:
             )
 
         return results
+
+    def _ensure_event_columns(self, cursor: sqlite3.Cursor) -> None:
+        cursor.execute("PRAGMA table_info(events)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if not columns:
+            return
+        if "cameras" not in columns:
+            cursor.execute("ALTER TABLE events ADD COLUMN cameras TEXT")
+        if "video_paths" not in columns:
+            cursor.execute("ALTER TABLE events ADD COLUMN video_paths TEXT")
+        if "event_mode" not in columns:
+            cursor.execute("ALTER TABLE events ADD COLUMN event_mode TEXT")
+        if "mode_type" not in columns:
+            cursor.execute("ALTER TABLE events ADD COLUMN mode_type TEXT")
+
+    def _decode_json_list(self, value: Any) -> List[Any]:
+        if not value:
+            return []
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            return []
+        return decoded if isinstance(decoded, list) else []
 
     def _build_keyword_filters(self, user_query: str) -> Dict[str, Any]:
         query_lower = user_query.lower()
@@ -147,6 +187,16 @@ class QueryEngine:
         if event_type in {"entering", "leaving", "staying"}:
             return event_type
         return "entering"
+
+    def _normalize_session_mode(self, session_mode: Optional[str]) -> Optional[str]:
+        if not session_mode:
+            return None
+        normalized = str(session_mode).strip().lower().replace("_", "-")
+        if normalized in {"single", "single-camera", "single camera"}:
+            return "single"
+        if normalized in {"multi", "multi-camera", "multi camera"}:
+            return "multi"
+        return None
 
     def _display_value(
         self,

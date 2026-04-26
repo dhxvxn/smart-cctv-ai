@@ -265,6 +265,7 @@ def play_event(
         global_id=target_global_id,
         entry_time=event_entry.get("entry_time"),
         exit_time=event_entry.get("exit_time"),
+        event_mode=event_entry.get("event_mode") or event_entry.get("session_mode"),
     )
     feeds: List[PlaybackFeed] = []
     for source in sources:

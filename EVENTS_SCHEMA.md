@@ -1,14 +1,46 @@
-# Event Schema (FINAL)
+# Event Schema (DUAL MODE)
 
-Store:
+## COMMON FIELDS
 
-- entry_time
-- exit_time
-- duration
 - global_id
+- start_time
+- end_time
+- duration
 
 ---
 
-## PURPOSE
+## SINGLE CAMERA EVENT
 
-Enable full timeline playback
+- camera_id
+- frames
+
+---
+
+## MULTI CAMERA EVENT
+
+- cameras = list of camera_ids
+- frames
+- transitions
+
+---
+
+## MODE FLAG
+
+event_mode = "single" | "multi"
+
+---
+
+## RULE
+
+IF mode == single:
+    log per camera
+
+IF mode == multi:
+    merge by global_id
+
+---
+
+## RESULT
+
+- Flexible logging
+- Supports both use cases

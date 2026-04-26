@@ -1,16 +1,5 @@
-# Final Features
-
-## Identity
-- [ ] FastReID integration
-- [ ] Cross-camera matching works
-
-## Playback
-- [ ] Full session playback
-- [ ] No frame clipping
-
-## UI
-- [ ] No full-frame highlight
-- [ ] Object-only highlight
-
-## Performance
-- [ ] Fast logging
+## Stability Fixes
+- [x] Two-stage matching implemented
+- [x] Color used as bonus only
+- [x] Time window increased
+- [x] ID fragmentation resolved

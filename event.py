@@ -1,14 +1,18 @@
+import json
 import sqlite3
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Hashable, List, Optional, Tuple
 
 DB_PATH = "events.db"
 
-# keeps one active in-memory session per (camera_id, global_id)
-sessions: Dict[Tuple[Optional[int], int], Dict[str, object]] = {}
+# keeps active in-memory sessions; multi-camera mode keys by global_id,
+# single-camera mode keys by camera + global_id.
+sessions: Dict[Hashable, Dict[str, object]] = {}
+active_events = sessions
 MIN_EVENT_DURATION_SECONDS = 1.0
 STAYING_THRESHOLD_SECONDS = 10.0
 SESSION_LINK_WINDOW_SECONDS = 3.0
+GLOBAL_EVENT_TIMEOUT_SECONDS = 3.0
 TRACKING_BATCH_SIZE = 100
 OBJECT_TYPE_ALIASES = {
     "people": "person",
@@ -27,6 +31,21 @@ def reset_runtime_state() -> None:
 def normalize_object_type(object_type: Optional[str]) -> str:
     normalized = (object_type or "").strip().lower()
     return OBJECT_TYPE_ALIASES.get(normalized, normalized)
+
+
+def normalize_event_mode(event_mode: Optional[str]) -> str:
+    normalized = (event_mode or "multi").strip().lower().replace("_", "-")
+    if normalized in {"single", "single-camera", "single camera"}:
+        return "single"
+    if normalized in {"multi", "multi-camera", "multi camera"}:
+        return "multi"
+    return "multi"
+
+
+def _session_key(event_mode: str, camera_id: Optional[int], global_id: int) -> Hashable:
+    if normalize_event_mode(event_mode) == "single":
+        return "single", camera_id, global_id
+    return "multi", global_id
 
 
 def _calculate_centroid(bbox):
@@ -119,7 +138,9 @@ def init_db():
             frame_end INTEGER,
             video_time REAL,
             zone_id INTEGER,
-            event_type TEXT
+            event_type TEXT,
+            event_mode TEXT,
+            mode_type TEXT
         )
         """
     )
@@ -132,6 +153,10 @@ def init_db():
     _ensure_column(cursor, "events", "exit_time", "TEXT")
     _ensure_column(cursor, "events", "duration", "REAL DEFAULT 0")
     _ensure_column(cursor, "events", "stayed", "INTEGER DEFAULT 0")
+    _ensure_column(cursor, "events", "cameras", "TEXT")
+    _ensure_column(cursor, "events", "video_paths", "TEXT")
+    _ensure_column(cursor, "events", "event_mode", "TEXT")
+    _ensure_column(cursor, "events", "mode_type", "TEXT")
 
     cursor.execute(
         """
@@ -208,12 +233,19 @@ def init_db():
         ON tracking_data (camera_id, video_path, global_id, frame_number)
         """
     )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_events_mode_timestamp
+        ON events (event_mode, timestamp)
+        """
+    )
 
     conn.commit()
     conn.close()
 
 
 def clear_event_logs() -> None:
+    sessions.clear()
     tracking_write_buffer.clear()
     conn = _connect()
     cursor = conn.cursor()
@@ -288,7 +320,9 @@ def _new_session(
     entry_time: str,
     video_time: float,
     frame_number: int,
+    event_mode: str,
 ) -> Dict[str, object]:
+    event_mode = normalize_event_mode(event_mode)
     return {
         "track_id": track_id,
         "global_id": global_id,
@@ -296,14 +330,27 @@ def _new_session(
         "zone_id": zone_id,
         "camera_id": camera_id,
         "video_path": video_path,
+        "cameras": {camera_id} if camera_id is not None else set(),
+        "video_paths": {video_path} if video_path else set(),
         "entry_time": entry_time,
+        "start_time": entry_time,
         "entry_video_time": video_time,
         "last_seen_time": entry_time,
+        "last_seen": entry_time,
         "last_video_time": video_time,
         "frame_start": frame_number,
         "last_frame_number": frame_number,
+        "frames": [frame_number],
         "inside_status": True,
+        "event_mode": event_mode,
     }
+
+
+def _session_json_list(session: Dict[str, object], key: str) -> str:
+    values = session.get(key)
+    if not values:
+        return "[]"
+    return json.dumps(sorted(values))
 
 
 def _insert_session_event(
@@ -320,8 +367,9 @@ def _insert_session_event(
         INSERT INTO events
         (timestamp, object_type, track_id, global_id, camera_id, video_path,
          frame_number, frame_start, frame_end, video_time, zone_id,
-         event_type, entry_time, exit_time, duration, stayed)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         event_type, entry_time, exit_time, duration, stayed, cameras, video_paths,
+         event_mode, mode_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             exit_time,
@@ -340,6 +388,10 @@ def _insert_session_event(
             exit_time,
             duration,
             int(stayed),
+            _session_json_list(session, "cameras"),
+            _session_json_list(session, "video_paths"),
+            session.get("event_mode", "multi"),
+            session.get("event_mode", "multi"),
         ),
     )
 
@@ -367,6 +419,34 @@ def _write_session_event(
     conn.close()
 
 
+def _finalize_session(session_key: Hashable, session: Dict[str, object]) -> None:
+    duration = _calculate_duration(session.get("entry_video_time"), float(session.get("last_video_time", 0.0)))
+    stayed = duration >= STAYING_THRESHOLD_SECONDS
+    if duration >= MIN_EVENT_DURATION_SECONDS:
+        _write_session_event(
+            session=session,
+            exit_time=str(session.get("last_seen_time") or _utc_now_iso()),
+            frame_number=int(session.get("last_frame_number", session.get("frame_start", 0))),
+            video_time=float(session.get("last_video_time", session.get("entry_video_time", 0.0))),
+            duration=duration,
+            stayed=stayed,
+        )
+    sessions.pop(session_key, None)
+
+
+def _finalize_expired_sessions(current_video_time: float) -> None:
+    expired_session_keys = []
+    for session_key, session in sessions.items():
+        last_video_time = float(session.get("last_video_time", session.get("entry_video_time", 0.0)))
+        if float(current_video_time) - last_video_time > GLOBAL_EVENT_TIMEOUT_SECONDS:
+            expired_session_keys.append(session_key)
+
+    for session_key in expired_session_keys:
+        session = sessions.get(session_key)
+        if session is not None:
+            _finalize_session(session_key, session)
+
+
 def update_session_event(
     track_id: int,
     global_id: int,
@@ -377,20 +457,23 @@ def update_session_event(
     camera_id: Optional[int],
     video_path: str,
     frame_number: int,
+    event_mode: str = "multi",
 ) -> Optional[str]:
     global_id = _require_global_id(global_id)
+    event_mode = normalize_event_mode(event_mode)
+    _finalize_expired_sessions(video_time)
     centroid = _calculate_centroid(bbox)
     object_type = normalize_object_type(object_type)
 
-    session_key = (camera_id, global_id)
-    session = sessions.get(session_key)
+    current_session_key = _session_key(event_mode, camera_id, global_id)
+    session = sessions.get(current_session_key)
     preferred_zone_id = int(session["zone_id"]) if session is not None else None
     matched_zone = _find_matching_zone(centroid, zones, preferred_zone_id)
 
     if session is None and matched_zone is not None:
         zone_id = int(matched_zone.get("id", 1))
         entry_time = _utc_now_iso()
-        sessions[session_key] = _new_session(
+        sessions[current_session_key] = _new_session(
             track_id=track_id,
             global_id=global_id,
             object_type=object_type,
@@ -400,47 +483,37 @@ def update_session_event(
             entry_time=entry_time,
             video_time=video_time,
             frame_number=frame_number,
+            event_mode=event_mode,
         )
-        print(f"ENTERING [{object_type}] GID {global_id} (track {track_id}) in zone {zone_id}")
+        print(
+            f"ENTERING [{event_mode}] [{object_type}] GID {global_id} "
+            f"(track {track_id}, camera {camera_id}) in zone {zone_id}"
+        )
         return "entering"
 
     if session is not None and matched_zone is not None:
         last_seen_time = _utc_now_iso()
+        if camera_id is not None:
+            session.setdefault("cameras", set()).add(camera_id)
+        if video_path:
+            session.setdefault("video_paths", set()).add(video_path)
         session["last_seen_time"] = last_seen_time
+        session["last_seen"] = last_seen_time
         session["last_video_time"] = video_time
         session["last_frame_number"] = frame_number
+        session.setdefault("frames", []).append(frame_number)
         session["track_id"] = track_id
         session["global_id"] = global_id
         session["object_type"] = object_type
         session["inside_status"] = True
+        session["event_mode"] = event_mode
 
         duration = _calculate_duration(session.get("entry_video_time"), video_time)
         stayed = duration >= STAYING_THRESHOLD_SECONDS
         return "staying" if stayed else None
 
     if session is not None and matched_zone is None:
-        duration = _calculate_duration(session.get("entry_video_time"), video_time)
-        stayed = duration >= STAYING_THRESHOLD_SECONDS
-        exit_time = _utc_now_iso()
-        zone_id = int(session["zone_id"])
-
-        if duration >= MIN_EVENT_DURATION_SECONDS:
-            session["object_type"] = object_type
-            _write_session_event(
-                session=session,
-                exit_time=exit_time,
-                frame_number=frame_number,
-                video_time=video_time,
-                duration=duration,
-                stayed=stayed,
-            )
-
-        sessions.pop(session_key, None)
-        print(
-            f"LEAVING [{object_type}] GID {global_id} (track {track_id}) in zone {zone_id} "
-            f"| duration={duration:.2f}s | stayed={stayed}"
-        )
-        return "leaving"
+        session["inside_status"] = False
 
     return None
 
@@ -448,27 +521,19 @@ def update_session_event(
 def finalize_camera_sessions(camera_id: Optional[int], video_path: Optional[str] = None) -> None:
     stale_keys = []
     for session_key, session in sessions.items():
-        session_camera_id, _ = session_key
-        if session_camera_id != camera_id:
+        cameras = session.get("cameras") or set()
+        video_paths = session.get("video_paths") or set()
+        if camera_id is not None and camera_id not in cameras:
             continue
-        if video_path is not None and session.get("video_path") != video_path:
+        if video_path is not None and video_path not in video_paths:
             continue
 
-        duration = _calculate_duration(session.get("entry_video_time"), session.get("last_video_time", 0.0))
-        stayed = duration >= STAYING_THRESHOLD_SECONDS
-        if duration >= MIN_EVENT_DURATION_SECONDS:
-            _write_session_event(
-                session=session,
-                exit_time=str(session.get("last_seen_time") or _utc_now_iso()),
-                frame_number=int(session.get("last_frame_number", session.get("frame_start", 0))),
-                video_time=float(session.get("last_video_time", session.get("entry_video_time", 0.0))),
-                duration=duration,
-                stayed=stayed,
-            )
         stale_keys.append(session_key)
 
     for session_key in stale_keys:
-        sessions.pop(session_key, None)
+        session = sessions.get(session_key)
+        if session is not None:
+            _finalize_session(session_key, session)
 
 
 def flush_tracking_data() -> None:
@@ -637,6 +702,7 @@ def get_playback_segments(
     global_id: Optional[int] = None,
     entry_time: Optional[str] = None,
     exit_time: Optional[str] = None,
+    event_mode: Optional[str] = None,
 ) -> List[Dict[str, object]]:
     flush_tracking_data()
     conn = _connect()
@@ -671,6 +737,20 @@ def get_playback_segments(
         params.append(camera_id)
 
     if track_id is not None and global_id is None:
+        sql += " AND video_path = ?"
+        params.append(video_path)
+
+    normalized_event_mode = normalize_event_mode(event_mode) if event_mode else None
+    if normalized_event_mode:
+        sql += " AND COALESCE(event_mode, mode_type, 'multi') = ?"
+        params.append(normalized_event_mode)
+
+    if normalized_event_mode == "single":
+        if camera_id is None:
+            sql += " AND camera_id IS NULL"
+        else:
+            sql += " AND camera_id = ?"
+            params.append(camera_id)
         sql += " AND video_path = ?"
         params.append(video_path)
 

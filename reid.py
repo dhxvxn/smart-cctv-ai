@@ -1,11 +1,16 @@
 import os
+from collections import deque
 from dataclasses import dataclass
-from typing import Dict, Optional, Set, Tuple
+from typing import Deque, Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
 
 from event import normalize_object_type
+
+STRONG_REID_THRESHOLD = 0.80
+MAX_TIME_DIFF_SECONDS = 10.0
+SOFT_MATCH_THRESHOLD = 0.45
 
 
 def _normalize_embedding(vector: np.ndarray) -> np.ndarray:
@@ -97,7 +102,37 @@ def extract_detection_features(frame, bbox: Tuple[int, int, int, int]) -> np.nda
 
 
 def extract_color_histogram(frame, bbox: Tuple[int, int, int, int]) -> Optional[np.ndarray]:
-    return extract_detection_features(frame, bbox)
+    return extract_shirt_color(frame, bbox)
+
+
+def extract_shirt_color(frame, bbox: Tuple[int, int, int, int]) -> Optional[np.ndarray]:
+    x1, y1, x2, y2 = _clip_bbox(frame.shape, bbox)
+    box_height = max(1, y2 - y1)
+    upper_y1 = y1 + int(box_height * 0.18)
+    upper_y2 = y1 + int(box_height * 0.55)
+    upper_y2 = max(upper_y1 + 1, min(upper_y2, y2))
+
+    crop = frame[upper_y1:upper_y2, x1:x2]
+    if crop.size == 0:
+        return None
+
+    rgb_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+    return np.mean(rgb_crop.reshape(-1, 3), axis=0).astype(np.float32)
+
+
+def color_distance(left: Optional[np.ndarray], right: Optional[np.ndarray]) -> float:
+    if left is None or right is None:
+        return 0.0
+    if left.size != 3 or right.size != 3:
+        return 0.0
+    max_distance = float(np.sqrt(3 * (255.0 ** 2)))
+    return min(float(np.linalg.norm(left.astype(np.float32) - right.astype(np.float32)) / max_distance), 1.0)
+
+
+def color_similarity(left: Optional[np.ndarray], right: Optional[np.ndarray]) -> float:
+    if left is None or right is None:
+        return 0.0
+    return 1.0 - color_distance(left, right)
 
 
 def cosine_similarity(left: np.ndarray, right: np.ndarray) -> float:
@@ -178,8 +213,12 @@ class IdentityRecord:
     global_id: int
     object_type: str
     embedding: np.ndarray
+    embedding_history: Deque[np.ndarray]
+    shirt_color: Optional[np.ndarray]
+    color_history: Deque[np.ndarray]
     last_camera_id: int
     last_seen_time: float
+    camera_history: List[int]
 
 
 @dataclass
@@ -192,23 +231,23 @@ class EmbeddingCacheRecord:
 class GlobalIdentityManager:
     def __init__(
         self,
-        similarity_threshold: float = 0.75,
+        similarity_threshold: float = 0.80,
         spatial_threshold: float = 150.0,
         cross_camera_similarity_threshold: Optional[float] = None,
-        match_window_seconds: float = 3.0,
+        match_window_seconds: float = 10.0,
         embedding_cache_ttl_seconds: float = 0.75,
         embedding_cache_iou_threshold: float = 0.85,
+        score_threshold: float = 0.45,
+        embedding_memory_size: int = 10,
     ):
-        self.similarity_threshold = similarity_threshold
+        self.similarity_threshold = STRONG_REID_THRESHOLD
         self.spatial_threshold = spatial_threshold
-        self.cross_camera_similarity_threshold = (
-            cross_camera_similarity_threshold
-            if cross_camera_similarity_threshold is not None
-            else similarity_threshold
-        )
-        self.match_window_seconds = match_window_seconds
+        self.cross_camera_similarity_threshold = STRONG_REID_THRESHOLD
+        self.match_window_seconds = MAX_TIME_DIFF_SECONDS
         self.embedding_cache_ttl_seconds = embedding_cache_ttl_seconds
         self.embedding_cache_iou_threshold = embedding_cache_iou_threshold
+        self.score_threshold = SOFT_MATCH_THRESHOLD
+        self.embedding_memory_size = max(1, int(embedding_memory_size))
         self.next_global_id = 1
         self.global_id_map: Dict[int, np.ndarray] = {}
         self.track_id_to_global_id: Dict[Tuple[int, int], int] = {}
@@ -218,6 +257,32 @@ class GlobalIdentityManager:
         self.embedding_cache: Dict[Tuple[int, int], EmbeddingCacheRecord] = {}
         self.embedder = FastReIDEmbedder()
         self.embedding_size = self.embedder.embedding_size
+
+    def _color_similarity(
+        self,
+        left: Optional[np.ndarray],
+        right: Optional[np.ndarray],
+    ) -> float:
+        return color_similarity(left, right)
+
+    def _log_match_attempt(
+        self,
+        candidate_gid: int,
+        reid_similarity: float,
+        color_similarity: float,
+        time_diff: float,
+        final_score: float,
+        decision: str,
+    ) -> None:
+        print(
+            "[DEBUG MATCH]\n"
+            f"GID: {candidate_gid}\n"
+            f"ReID: {reid_similarity:.4f}\n"
+            f"Color: {color_similarity:.4f}\n"
+            f"Time: {time_diff:.2f}\n"
+            f"Score: {final_score:.4f}\n"
+            f"Decision: {decision}"
+        )
 
     def _allocate_global_id(self) -> int:
         global_id = self.next_global_id
@@ -265,14 +330,21 @@ class GlobalIdentityManager:
         local_key = (camera_id, track_id)
         object_type = normalize_object_type(object_type)
         embedding = self._get_embedding(camera_id, track_id, frame, bbox, current_time)
+        shirt_color = extract_shirt_color(frame, bbox)
         self._prune_runtime_caches(current_time)
 
         existing_global_id = self.track_id_to_global_id.get(local_key)
         if self._is_valid_global_id(existing_global_id):
+            print(
+                "[MATCH FOUND] "
+                f"GID {existing_global_id} reused for camera {camera_id} track {track_id} "
+                "(existing local track)"
+            )
             self._refresh_record(
                 existing_global_id,
                 object_type,
                 embedding,
+                shirt_color,
                 camera_id,
                 current_time,
             )
@@ -286,16 +358,22 @@ class GlobalIdentityManager:
             camera_id,
             object_type,
             embedding,
+            shirt_color,
             current_time,
         )
 
         if not self._is_valid_global_id(matched_global_id):
             matched_global_id = self._allocate_global_id()
+            print(
+                "[NEW ID CREATED] "
+                f"GID {matched_global_id} for camera {camera_id} track {track_id}"
+            )
 
         self._refresh_record(
             matched_global_id,
             object_type,
             embedding,
+            shirt_color,
             camera_id,
             current_time,
         )
@@ -335,12 +413,13 @@ class GlobalIdentityManager:
         camera_id: int,
         object_type: str,
         embedding: np.ndarray,
+        shirt_color: Optional[np.ndarray],
         current_time: float,
     ) -> Optional[int]:
         object_type = normalize_object_type(object_type)
 
         best_global_id = None
-        best_similarity = 0.0
+        best_score = float("-inf")
         best_time_diff = float("inf")
         assigned_in_same_camera_slot = self.camera_time_assignments.get(
             self._assignment_slot_key(camera_id, current_time),
@@ -354,26 +433,66 @@ class GlobalIdentityManager:
             if global_id in assigned_in_same_camera_slot:
                 continue
 
-            similarity = cosine_similarity(embedding, record.embedding)
-            time_diff = abs(float(current_time) - float(record.last_seen_time))
-            threshold = (
-                self.cross_camera_similarity_threshold
-                if record.last_camera_id != camera_id
-                else self.similarity_threshold
+            reid_similarity = cosine_similarity(embedding, record.embedding)
+            color_similarity = self._color_similarity(shirt_color, record.shirt_color)
+            time_diff = float(current_time) - float(record.last_seen_time)
+
+            if time_diff < 0 or time_diff >= self.match_window_seconds:
+                self._log_match_attempt(
+                    candidate_gid=global_id,
+                    reid_similarity=reid_similarity,
+                    color_similarity=color_similarity,
+                    time_diff=abs(time_diff),
+                    final_score=float("-inf"),
+                    decision="new_id(candidate_filter)",
+                )
+                continue
+
+            if reid_similarity > STRONG_REID_THRESHOLD:
+                self._log_match_attempt(
+                    candidate_gid=global_id,
+                    reid_similarity=reid_similarity,
+                    color_similarity=color_similarity,
+                    time_diff=abs(time_diff),
+                    final_score=reid_similarity,
+                    decision="match(stage1_strong_reid)",
+                )
+                print(f"[STRONG MATCH] GID {global_id}")
+                print(f"[MATCH FOUND] GID {global_id}")
+                return global_id
+
+            time_penalty = min(abs(time_diff) / MAX_TIME_DIFF_SECONDS, 1.0)
+            score = (
+                0.7 * reid_similarity
+                + 0.05 * color_similarity
+                - 0.2 * time_penalty
             )
 
-            if similarity <= threshold or time_diff >= self.match_window_seconds:
+            decision = "match(stage2_soft)" if score > self.score_threshold else "new_id"
+            self._log_match_attempt(
+                candidate_gid=global_id,
+                reid_similarity=reid_similarity,
+                color_similarity=color_similarity,
+                time_diff=abs(time_diff),
+                final_score=score,
+                decision=decision,
+            )
+
+            if score <= self.score_threshold:
                 continue
 
-            if similarity < best_similarity:
+            if score < best_score:
                 continue
 
-            if similarity == best_similarity and time_diff >= best_time_diff:
+            if score == best_score and time_diff >= best_time_diff:
                 continue
 
-            best_similarity = similarity
+            best_score = score
             best_time_diff = time_diff
             best_global_id = global_id
+
+        if best_global_id is not None:
+            print(f"[MATCH FOUND] GID {best_global_id}")
 
         return best_global_id
 
@@ -382,28 +501,50 @@ class GlobalIdentityManager:
         global_id: int,
         object_type: str,
         embedding: np.ndarray,
+        shirt_color: Optional[np.ndarray],
         camera_id: int,
         current_time: float,
     ) -> None:
         object_type = normalize_object_type(object_type)
         record = self.identity_store.get(global_id)
         if record is None:
-            self.global_id_map[global_id] = embedding
+            history = deque([embedding], maxlen=self.embedding_memory_size)
+            avg_embedding = _normalize_embedding(np.mean(np.stack(history), axis=0))
+            color_history: Deque[np.ndarray] = deque(maxlen=self.embedding_memory_size)
+            if shirt_color is not None:
+                color_history.append(shirt_color)
+            self.global_id_map[global_id] = avg_embedding
             self.identity_store[global_id] = IdentityRecord(
                 global_id=global_id,
                 object_type=object_type,
-                embedding=embedding,
+                embedding=avg_embedding,
+                embedding_history=history,
+                shirt_color=self._average_color(color_history),
+                color_history=color_history,
                 last_camera_id=camera_id,
                 last_seen_time=float(current_time),
+                camera_history=[camera_id],
             )
             return
 
-        updated_embedding = _normalize_embedding((record.embedding * 0.7) + (embedding * 0.3))
-        record.embedding = updated_embedding
-        self.global_id_map[global_id] = updated_embedding
+        record.embedding_history.append(embedding)
+        avg_embedding = _normalize_embedding(np.mean(np.stack(record.embedding_history), axis=0))
+        record.embedding = avg_embedding
+        self.global_id_map[global_id] = avg_embedding
         record.object_type = object_type
+        if shirt_color is not None:
+            record.color_history.append(shirt_color)
+            record.shirt_color = self._average_color(record.color_history)
         record.last_camera_id = camera_id
         record.last_seen_time = float(current_time)
+        record.camera_history.append(camera_id)
+        if len(record.camera_history) > self.embedding_memory_size:
+            record.camera_history = record.camera_history[-self.embedding_memory_size:]
+
+    def _average_color(self, color_history: Deque[np.ndarray]) -> Optional[np.ndarray]:
+        if not color_history:
+            return None
+        return np.mean(np.stack(color_history), axis=0).astype(np.float32)
 
     def clear_camera_track_mappings(self, camera_id: Optional[int] = None) -> None:
         if camera_id is None:

@@ -79,13 +79,16 @@ def prompt_camera_configs():
 
     if mode_choice == "1":
         source = _prompt_non_empty("Enter video path for camera 1: ")
-        return [
-            {
-                "camera_id": 1,
-                "name": "Camera 1",
-                "source": source,
-            }
-        ]
+        return (
+            [
+                {
+                    "camera_id": 1,
+                    "name": "Camera 1",
+                    "source": source,
+                }
+            ],
+            "single",
+        )
 
     while True:
         total_cameras = input("Enter number of cameras: ").strip()
@@ -105,7 +108,7 @@ def prompt_camera_configs():
             }
         )
 
-    return camera_configs
+    return camera_configs, "multi"
 
 
 def resolve_capture_source(source):
@@ -233,9 +236,11 @@ def _print_event_summary(results: list):
     print("\nFound events:")
     print(f"Index | {label.title():19} | Camera | Zone | Object | Global")
     for idx, event in enumerate(results):
+        cameras = event.get("cameras") or [event["camera_id"]]
+        camera_label = ",".join(str(camera) for camera in cameras if camera is not None)
         print(
             f"{idx:5} | {str(event['display_value'])[:19]:19} | "
-            f"{event['camera_id']:6} | {str(event['zone_id']):4} | "
+            f"{camera_label[:6]:6} | {str(event['zone_id']):4} | "
             f"{event['object_type']:6} | {str(event.get('global_id', '-')):6}"
         )
 
@@ -261,15 +266,15 @@ def _select_event(results: list):
         return
 
 
-def run_query_mode(query_engine: QueryEngine, intent_manager: IntentManager):
+def run_query_mode(query_engine: QueryEngine, intent_manager: IntentManager, session_mode: str):
     while True:
-        query = input("\nSearch query (Enter to return): ").strip()
+        query = input(f"\nSearch query ({session_mode} mode, Enter to return): ").strip()
         if not query:
             return
 
         intent_manager.set_intent(query)
         filters = intent_manager.get_filters()
-        results = query_engine.run_query(filters=filters)
+        results = query_engine.run_query(filters=filters, session_mode=session_mode)
 
         if not results:
             print("No matching events found.")
@@ -307,7 +312,12 @@ def _create_camera_runtime(camera_config: Dict[str, object]) -> Optional[CameraR
     )
 
 
-def _process_camera_frame(camera_state: CameraRuntime, detector: HumanDetector, identity_manager: GlobalIdentityManager) -> None:
+def _process_camera_frame(
+    camera_state: CameraRuntime,
+    detector: HumanDetector,
+    identity_manager: GlobalIdentityManager,
+    session_mode: str,
+) -> None:
     if camera_state.finished:
         return
 
@@ -376,6 +386,7 @@ def _process_camera_frame(camera_state: CameraRuntime, detector: HumanDetector, 
             camera_id=camera_state.camera_id,
             video_path=camera_state.source,
             frame_number=camera_state.current_frame_number,
+            event_mode=session_mode,
         )
 
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -419,7 +430,7 @@ def _advance_cameras(camera_states: List[CameraRuntime]) -> None:
         camera_state.display_frame = None
 
 
-def run_surveillance_mode(camera_configs, detector, identity_manager):
+def run_surveillance_mode(camera_configs, detector, identity_manager, session_mode: str):
     camera_states = []
     for camera_config in camera_configs:
         camera_state = _create_camera_runtime(camera_config)
@@ -431,7 +442,7 @@ def run_surveillance_mode(camera_configs, detector, identity_manager):
         print("❌ No camera streams are available for surveillance mode.")
         return True
 
-    print("\n▶ Monitoring all configured cameras")
+    print(f"\n▶ Monitoring all configured cameras ({session_mode} event mode)")
     print("   Controls: 1-9 fullscreen, M multi-view, SPACE pause/play, LEFT/RIGHT seek, Q/Esc exit.")
 
     reset_runtime_state()
@@ -449,7 +460,7 @@ def run_surveillance_mode(camera_configs, detector, identity_manager):
             if not paused or any(state.display_frame is None for state in camera_states if not state.finished):
                 for camera_state in camera_states:
                     if not paused or camera_state.display_frame is None:
-                        _process_camera_frame(camera_state, detector, identity_manager)
+                        _process_camera_frame(camera_state, detector, identity_manager, session_mode)
 
             feed_views = []
             for camera_state in camera_states:
@@ -515,7 +526,7 @@ def run_surveillance_mode(camera_configs, detector, identity_manager):
 
 
 def main():
-    camera_configs = prompt_camera_configs()
+    camera_configs, session_mode = prompt_camera_configs()
     init_db()
     clear_event_logs()
     detector = HumanDetector()
@@ -533,11 +544,11 @@ def main():
         choice = input("Enter choice (1/2/q): ").strip().lower()
 
         if choice == "1":
-            should_continue = run_surveillance_mode(camera_configs, detector, identity_manager)
+            should_continue = run_surveillance_mode(camera_configs, detector, identity_manager, session_mode)
             if not should_continue:
                 return
         elif choice == "2":
-            run_query_mode(query_engine, intent_manager)
+            run_query_mode(query_engine, intent_manager, session_mode)
         elif choice == "q":
             break
         else:

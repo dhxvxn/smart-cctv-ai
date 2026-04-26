@@ -58,6 +58,7 @@ def ensure_valid_schema() -> str:
                 video_time REAL,
                 zone_id INTEGER,
                 event_type TEXT,
+                event_mode TEXT,
                 mode_type TEXT
             )
             """
@@ -67,6 +68,7 @@ def ensure_valid_schema() -> str:
         _ensure_column(cursor, "events", "frame_start", "INTEGER")
         _ensure_column(cursor, "events", "frame_end", "INTEGER")
         _ensure_column(cursor, "events", "global_id", "INTEGER")
+        _ensure_column(cursor, "events", "event_mode", "TEXT")
         _ensure_column(cursor, "events", "mode_type", "TEXT")
 
         cursor.execute(

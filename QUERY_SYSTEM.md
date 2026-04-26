@@ -1,23 +1,53 @@
-# Query System (FINAL FILTERING)
+# Query System (SESSION MODE)
 
-## FILTER RULES
+## START BEHAVIOR
 
-### If query = "car entering"
-→ return events where object_type='car'
+On running search_console.py:
 
-### If query = "track_id=5"
-→ return only that object
+Ask:
 
-### If query = "staying"
-→ return events where stayed = TRUE
-
-### If query = "entering"
-→ show entry_time only
+"Select mode:
+1. Single Camera Events
+2. Multi Camera Events"
 
 ---
 
-## DISPLAY LOGIC
+## SESSION LOCK
 
-- entering → show entry_time
-- leaving → show exit_time
-- staying → show duration
+- Store selection as session_mode
+- Do NOT ask again during session
+
+---
+
+## QUERY FLOW
+
+WHILE True:
+
+    user_input = query
+
+    filter events based on session_mode
+
+---
+
+## EXIT BEHAVIOR
+
+IF user types:
+
+"exit"
+
+→ terminate program
+
+---
+
+## MODE SWITCH
+
+To change mode:
+- restart program
+
+---
+
+## RESULT
+
+- Clean user experience
+- No repeated prompts
+- Clear event separation

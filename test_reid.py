@@ -3,7 +3,7 @@ import sqlite3
 
 import numpy as np
 
-from event import clear_event_logs, get_playback_segments, init_db
+from event import clear_event_logs, finalize_camera_sessions, get_playback_segments, init_db, update_session_event
 from reid import GlobalIdentityManager
 
 
@@ -12,6 +12,13 @@ def make_frame(bbox, color=(0, 0, 255), shape=(240, 320, 3)):
     x1, y1, x2, y2 = bbox
     frame[y1:y2, x1:x2] = color
     return frame
+
+
+class FixedEmbedder:
+    embedding_size = 4
+
+    def extract(self, frame, bbox):
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
 
 class GlobalIdentityManagerTests(unittest.TestCase):
@@ -230,6 +237,33 @@ class GlobalIdentityManagerTests(unittest.TestCase):
 
         self.assertNotEqual(first_global_id, second_global_id)
 
+    def test_different_shirt_color_prevents_close_identity_merge(self):
+        manager = GlobalIdentityManager(similarity_threshold=0.8)
+        manager.embedder = FixedEmbedder()
+        bbox = (30, 50, 110, 170)
+
+        first_global_id = manager.assign_global_id(
+            camera_id=1,
+            track_id=10,
+            frame=make_frame(bbox, color=(0, 0, 255), shape=(360, 480, 3)),
+            bbox=bbox,
+            object_type="person",
+            current_time=1.0,
+        )
+
+        manager.clear_camera_track_mappings(camera_id=1)
+
+        second_global_id = manager.assign_global_id(
+            camera_id=1,
+            track_id=11,
+            frame=make_frame(bbox, color=(255, 0, 0), shape=(360, 480, 3)),
+            bbox=bbox,
+            object_type="person",
+            current_time=1.2,
+        )
+
+        self.assertNotEqual(first_global_id, second_global_id)
+
 
 class PlaybackSessionTests(unittest.TestCase):
     def setUp(self):
@@ -329,6 +363,44 @@ class PlaybackSessionTests(unittest.TestCase):
         self.assertEqual(segments[0]["end_frame"], 40)
         self.assertEqual(segments[1]["start_frame"], 5)
         self.assertEqual(segments[1]["end_frame"], 25)
+
+    def test_global_event_merges_cameras_for_same_global_id(self):
+        zones = [{"id": 1, "x1": 0, "y1": 0, "x2": 200, "y2": 200}]
+
+        update_session_event(
+            track_id=10,
+            global_id=77,
+            object_type="person",
+            bbox=(20, 20, 40, 80),
+            zones=zones,
+            video_time=0.0,
+            camera_id=1,
+            video_path="cam1.mp4",
+            frame_number=0,
+        )
+        update_session_event(
+            track_id=5,
+            global_id=77,
+            object_type="person",
+            bbox=(30, 30, 40, 80),
+            zones=zones,
+            video_time=1.5,
+            camera_id=2,
+            video_path="cam2.mp4",
+            frame_number=15,
+        )
+        finalize_camera_sessions(camera_id=2, video_path="cam2.mp4")
+
+        conn = sqlite3.connect("events.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT global_id, cameras, video_paths FROM events")
+        rows = cursor.fetchall()
+        conn.close()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], 77)
+        self.assertEqual(rows[0][1], "[1, 2]")
+        self.assertEqual(rows[0][2], '["cam1.mp4", "cam2.mp4"]')
 
 
 if __name__ == "__main__":
